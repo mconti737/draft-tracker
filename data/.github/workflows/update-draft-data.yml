@@ -1,0 +1,91 @@
+name: Update Draft Data
+
+# ─── Schedule ────────────────────────────────────────────────────────────────
+# Runs automatically on April 28th every year (NFL Draft typically ends by then)
+# Also runs May 5th as a safety backup in case the draft ran late
+# You can also trigger it manually from the GitHub Actions tab at any time
+on:
+  schedule:
+    - cron: '0 10 28 4 *'   # April 28,  10:00 AM UTC
+    - cron: '0 10 5  5 *'   # May 5,     10:00 AM UTC (backup run)
+  workflow_dispatch:          # manual trigger button in GitHub Actions tab
+
+# ─── Permissions ─────────────────────────────────────────────────────────────
+permissions:
+  contents: write   # needed to push the updated index.html back to the repo
+
+# ─── Job ─────────────────────────────────────────────────────────────────────
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60       # abort if something hangs
+
+    steps:
+
+      # 1. Check out the repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      # 4. Detect the current draft year
+      #    The NFL Draft is always for the current calendar year.
+      #    We grab the year dynamically so this workflow never needs editing.
+      - name: Detect draft year
+        id: year
+        run: echo "draft_year=$(date +%Y)" >> $GITHUB_OUTPUT
+
+      # 5. Scrape the new year's data
+      #    scrape.py is smart: if the year already exists in data/ it skips it.
+      #    The --force flag re-scrapes even if data already exists.
+      - name: Scrape draft & combine data
+        run: |
+          python scrape.py ${{ steps.year.outputs.draft_year }}
+        env:
+          PYTHONUNBUFFERED: "1"   # show live output in logs
+
+      # 6. Bake the new data into index.html
+      - name: Update index.html
+        run: python update_data.py
+
+      # 7. Commit and push if anything changed
+      #    If the data didn't change (e.g. draft hasn't happened yet on April 28),
+      #    the git diff will be empty and we skip the commit cleanly.
+      - name: Commit and push changes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add index.html data/
+
+          # Only commit if something actually changed
+          if git diff --staged --quiet; then
+            echo "No changes detected — data may not be available yet. Skipping commit."
+          else
+            git commit -m "Auto-update: ${{ steps.year.outputs.draft_year }} NFL Draft data [skip ci]"
+            git push
+            echo "✓ Pushed updated index.html with ${{ steps.year.outputs.draft_year }} draft data"
+          fi
+
+      # 8. Summary in the Actions log
+      - name: Print summary
+        run: |
+          echo "### NFL Draft Tracker — Auto Update" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Year:** ${{ steps.year.outputs.draft_year }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "data/${{ steps.year.outputs.draft_year }}.json" ]; then
+            PICKS=$(python3 -c "import json; d=json.load(open('data/${{ steps.year.outputs.draft_year }}.json')); print(len(d['draft_picks']))")
+            echo "**Picks scraped:** $PICKS" >> $GITHUB_STEP_SUMMARY
+            echo "**Status:** ✅ index.html updated and deployed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:** ⚠️ Data file not found — draft data may not be published yet" >> $GITHUB_STEP_SUMMARY
+          fi
